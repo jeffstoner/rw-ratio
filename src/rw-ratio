@@ -1,0 +1,258 @@
+#!/usr/bin/perl
+
+# 
+# rw-ratio
+#   calculate read-to-write ratios for a MySQL database server
+#
+# Copyright 2009 Jeff Stoner (https://www.google.com/+JeffStoner)
+# LICENSE: This program is licensed under the terms of the GNU GPL v3 or later.
+#
+#
+
+# External module dependencies
+use strict;
+use DBI;
+use Getopt::Long;
+use Term::ReadKey;  # for reading passwords from stdin
+use Pod::Usage;  # for help
+
+# global variables
+my %commands = ();  # hold last-known values
+my %delta_commands = ();  # holds current values
+my $row = "";  # buffer for iterating over query results
+my $write_commands = 0;  # grand total write count
+my $read_commands = 0;  # grand total read count
+my $delta_writes = 0;  # delta writes (previous - current), gets reset each time through loop
+my $delta_reads = 0; # delta reads (previous - current), gets reset each time through loop
+my $delta = 0;  # temp variable for calculations
+my $sleepy_time = 300;  # number of seconds to pause
+my ($host, $user, $password, $port) = "";  # DSN values
+my ($current_ratio, $total_ratio) = 0;  # immediate and overall r/w ratio
+my $epoch = 0;  # timestamp
+my $help = "";  # simple flag
+
+my $debug = 0;  # for printing "interesting" info during processing
+
+# MAIN
+
+# parse command line args
+GetOptions(
+   "host=s" => \$host,
+   "user=s" => \$user,
+   "port=i" => \$port,
+   "password=s" => \$password,
+   "sleep=i" => \$sleepy_time,
+   "help" => \$help,
+   "debug" => \$debug,
+) || pod2usage(-verbose => 0, -exitval => 1, -output => \*STDERR);
+
+pod2usage(-verbose => 1, exitval => 0) if ($help);
+pod2usage(-msg => "You must provide at least a host and user.", -exitval => 1, -output => \*STDERR) if (!$host || !$user);
+
+# do sanity checks, set reasonable defaults, where possible
+$port = 3306 unless defined $port;
+$sleepy_time = 300 unless defined $sleepy_time;
+
+# get a password if not specified in args
+if (!$password) {
+   print "Enter password: ";
+   ReadMode('noecho');
+   $password = ReadLine(0);
+   chomp($password);
+   ReadMode('normal');
+   print "\n";
+}
+
+pod2usage(-msg => "You must supply a password.", -verbose => 0, -exitval => 1, -output => \*STDERR) if (!$password);
+
+# create our connect string
+my $DSN = "DBI:mysql:database=INFORMATION_SCHEMA;host=$host;port=$port";
+
+print STDERR "Host: $host, Port: $port, User: $user, Sleep: $sleepy_time\n" if ($debug);
+
+# set up signal handlers
+#$SIG{HUP} = $SIG{INT} = $SIG{QUIT} = $SIG{USR1} = $SIG{USR2} = $SIG{ALRM} = $SIG{TERM} = \&sig_handler();
+
+# connect to the database
+my $dbh = DBI->connect($DSN, $user, $password) or die "Cannot connect to MySQL: $@\n";
+
+# define our SQL and prepare the statement for execution
+my $sql = q{SHOW GLOBAL STATUS LIKE 'Com_%'};
+my $sth = $dbh->prepare($sql);  # we only have to do this once
+
+# loop forever
+while (1) {
+   # reset some values
+   $delta = $delta_reads = $delta_writes = 0;
+
+   # update timestamp
+   $epoch = time;
+   # grab our status values
+   $sth->execute() or die;  # if we can't execute, we bail
+
+   # pull the results into our hash
+   while ($row = $sth->fetchrow_arrayref()) {
+      $delta_commands{$$row[0]} = $$row[1];
+   }
+
+   # calculations
+   foreach $row (keys %delta_commands) {
+      # add up each dml into a delta (current - previous) and a running total
+      if ($row =~ m/_alter_|_create_|_delete|_drop_|_insert|_load|_rename|_replace|_truncate|_update/) {
+         if (!$commands{$row}) { $commands{$row} = 0; }  # prevent problems
+         $delta = $delta_commands{$row} - $commands{$row};
+         $delta_writes += $delta;
+         $write_commands += $delta;
+         print STDERR "WRITE $row: current $delta_commands{$row}, previous $commands{$row}, delta $delta\n" if ($debug);
+      }
+
+      # add up each select into a delta (current - previous) and a running total
+      # the INSERT ... SELECT and REPLACE ... SELECT are considered *both* a read and write statement
+      if ($row =~ m/_select/) {
+         if (!$commands{$row}) { $commands{$row} = 0; } # prevent problems
+         $delta = $delta_commands{$row} - $commands{$row};
+         $delta_reads += $delta;
+         $read_commands += $delta;
+         print STDERR "READ $row: current $delta_commands{$row}, previous $commands{$row}, delta $delta\n" if ($debug);
+      }
+
+   }
+
+   # calc immediate and overall read/write ratios (make sure denominator is non-zero)
+   $current_ratio = $delta_reads / ($delta_writes == 0 ? 1 : $delta_writes);
+   $total_ratio = $read_commands / ($write_commands == 0 ? 1 : $write_commands);
+
+   # replace "previous" values with current values
+   %commands = %delta_commands;
+   # zero-out our current values
+   %delta_commands = ();
+
+   # print this run's results
+   print "Time: $epoch\tInterval: $sleepy_time\tR: $read_commands\tdR: $delta_reads\tW: $write_commands\tdW: $delta_writes\t";
+   printf "dR/dW: %.2f\tR/W: %.2f\n", $current_ratio, $total_ratio;  # use printf for formatting of numbers
+
+   sleep $sleepy_time;  # pause a bit
+} # end while (1)
+
+# close db connection
+$dbh->disconnect();
+
+# subs
+sub sig_handler() {
+   # signal handler
+   $dbh->disconnect() if ($dbh);
+   exit;
+}
+
+# pod docs
+__END__
+
+=head1 NAME
+
+rw-ratio
+
+=head1 SYNOPSIS
+
+Calculates the read/write ratio of a MySQL server.
+
+rw-ratio --host=host --user=user [--password=password --port=port --sleep=sleep]
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<--host>
+
+The hostname of IP address of the database server to connect to.
+
+=item B<--port>
+
+The port number of the database server to connect to. It defaults to 3306.
+
+=item B<--user>
+
+The username to connect as.
+
+=item B<--password>
+
+The password to connect with. If not supplied on the command line, you will be prompted for it.
+
+=item B<--sleep>
+
+The number of seconds to sleep between each sample. It defaults to 300.
+
+=item B<--help>
+
+This manual page. Full docs are availabe in the POD (perldoc rw-ratio).
+
+=back
+
+=head1 DESCRIPTION
+
+The B<rw-ratio> program queries a MySQL server periodically to capture many of the Com_* status counters. From
+these counters, it prints out several stats including two ratios. All fields are TAB separated. Sample output
+looks like:
+
+Time: 1253902509        Interval: 10    R: 59   dR: 59  W: 17   dW: 17  dR/dW: 3.47     R/W: 3.47
+
+The deltas can be disregarded in the first line of output since there are no previous counters to compare to.
+Two SQL statements count as both read and write statements: INSERT ... SELECT; and REPLACE ... SELECT; so are,
+thus, counted twice.
+
+=head1 OUTPUT
+
+The fields are:
+
+=over 8
+
+=item B<Time>
+
+The timestamp, expressed as a UNIX epoch, of the sample.
+
+=item B<Interval>
+
+The number of seconds between the previous sample and the current sample.
+
+=item B<R>
+
+The total number of database reads.
+
+=item B<dR>
+
+The delta of reads between the previous sample and the current sample.
+
+=item B<W>
+
+The total number of database writes.
+
+=item B<dW>
+
+The delta of writes between the previous sample and the current sample.
+
+=item B<dR/dW>
+
+The ratio of reads to writes, calculated using the current deltas
+
+=item B<R/W>
+
+The ratio of reads to writes, calculated using the totals
+
+=back
+
+=head1 BUGS
+
+As with any software, this program may contain bugs.
+
+=head1 AUTHOR
+
+This program was written by Jeff Stoner (https://www.google.com/+JeffStoner)
+
+=head1 LICENSE
+
+This program is Copyright 2009 Jeff Stoner. It is released under the terms of the GNU General
+Protection License, version 3 or later (GNU GPL v3).
+
+This program is released AS-IS, WITH NO WARRANTY, expressed or implied.
+
+=cut
+
