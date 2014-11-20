@@ -10,12 +10,12 @@ rw-ratio --host=host --user=user [--password=password --port=port --sleep=sleep]
 ### Details
 OPTIONS
 
---host The hostname of IP address of the database server to connect to.
---port The port number of the database server to connect to. It defaults to 3306.
---user The username to connect as.
---password The password to connect with. If not supplied on the command line, you will be prompted for it.
---sleep The number of seconds to sleep between each sample. It defaults to 300.
---help This manual page. Full docs are availabe in the POD (perldoc rw-ratio).
+* --host The hostname of IP address of the database server to connect to.
+* --port The port number of the database server to connect to. It defaults to 3306.
+* --user The username to connect as.
+* --password The password to connect with. If not supplied on the command line, you will be prompted for it.
+* --sleep The number of seconds to sleep between each sample. It defaults to 300.
+* --help This manual page. Full docs are availabe in the POD (perldoc rw-ratio).
 
 ## Output
 
